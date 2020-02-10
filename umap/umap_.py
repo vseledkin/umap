@@ -214,16 +214,16 @@ def smooth_knn_dist(distances, k, n_iter=64, local_connectivity=1.0, bandwidth=1
 
 
 def nearest_neighbors(
-    X,
-    n_neighbors,
-    metric,
-    metric_kwds,
-    angular,
-    random_state,
-    low_memory=False,
-    use_pynndescent=True,
-    verbose=False,
-):
+        X,
+        n_neighbors,
+        metric,
+        metric_kwds,
+        angular,
+        random_state,
+        low_memory=False,
+        use_pynndescent=True,
+        verbose=False,
+    ):
     """Compute the ``n_neighbors`` nearest points for each data point in ``X``
     under ``metric``. This may be exact, but more likely is approximated via
     nearest neighbor descent.
@@ -414,7 +414,6 @@ def nearest_neighbors(
     if verbose:
         print(ts(), "Finished Nearest Neighbor Search")
     return knn_indices, knn_dists, rp_forest
-
 
 @numba.njit(
     locals={
@@ -617,6 +616,156 @@ def fuzzy_simplicial_set(
 
     result = scipy.sparse.coo_matrix(
         (vals, (rows, cols)), shape=(X.shape[0], X.shape[0])
+    )
+    result.eliminate_zeros()
+
+    if apply_set_operations:
+        transpose = result.transpose()
+
+        prod_matrix = result.multiply(transpose)
+
+        result = (
+            set_op_mix_ratio * (result + transpose - prod_matrix)
+            + (1.0 - set_op_mix_ratio) * prod_matrix
+        )
+
+    result.eliminate_zeros()
+
+    return result, sigmas, rhos
+
+def fuzzy_faiss_simplicial_set(
+    X_index,
+    n_neighbors,
+    random_state,
+    metric,
+    metric_kwds={},
+    knn_indices=None,
+    knn_dists=None,
+    angular=False,
+    set_op_mix_ratio=1.0,
+    local_connectivity=1.0,
+    apply_set_operations=True,
+    verbose=False,
+):
+    """Given a set of data stored in X_index, a neighborhood size, and a measure of distance
+    compute the fuzzy simplicial set (here represented as a fuzzy graph in
+    the form of a sparse matrix) associated to the data. This is done by
+    locally approximating geodesic distance at each point, creating a fuzzy
+    simplicial set for each such point, and then combining all the local
+    fuzzy simplicial sets into a global one via a fuzzy union.
+
+    Parameters
+    ----------
+    X_index: instance of faiss index. The data to be modelled as a fuzzy simplicial set.
+
+    n_neighbors: int
+        The number of neighbors to use to approximate geodesic distance.
+        Larger numbers induce more global estimates of the manifold that can
+        miss finer detail, while smaller values will focus on fine manifold
+        structure to the detriment of the larger picture.
+
+    random_state: numpy RandomState or equivalent
+        A state capable being used as a numpy random state.
+
+    metric: string or function (optional, default 'euclidean')
+        The metric to use to compute distances in high dimensional space.
+        If a string is passed it must match a valid predefined metric. If
+        a general metric is required a function that takes two 1d arrays and
+        returns a float can be provided. For performance purposes it is
+        required that this be a numba jit'd function. Valid string metrics
+        include:
+            * euclidean (or l2)
+            * manhattan (or l1)
+            * cityblock
+            * braycurtis
+            * canberra
+            * chebyshev
+            * correlation
+            * cosine
+            * dice
+            * hamming
+            * jaccard
+            * kulsinski
+            * ll_dirichlet
+            * mahalanobis
+            * matching
+            * minkowski
+            * rogerstanimoto
+            * russellrao
+            * seuclidean
+            * sokalmichener
+            * sokalsneath
+            * sqeuclidean
+            * yule
+            * wminkowski
+
+        Metrics that take arguments (such as minkowski, mahalanobis etc.)
+        can have arguments passed via the metric_kwds dictionary. At this
+        time care must be taken and dictionary elements must be ordered
+        appropriately; this will hopefully be fixed in the future.
+
+    metric_kwds: dict (optional, default {})
+        Arguments to pass on to the metric, such as the ``p`` value for
+        Minkowski distance.
+
+    knn_indices: array of shape (n_samples, n_neighbors) (optional)
+        If the k-nearest neighbors of each point has already been calculated
+        you can pass them in here to save computation time. This should be
+        an array with the indices of the k-nearest neighbors as a row for
+        each data point.
+
+    knn_dists: array of shape (n_samples, n_neighbors) (optional)
+        If the k-nearest neighbors of each point has already been calculated
+        you can pass them in here to save computation time. This should be
+        an array with the distances of the k-nearest neighbors as a row for
+        each data point.
+
+    angular: bool (optional, default False)
+        Whether to use angular/cosine distance for the random projection
+        forest for seeding NN-descent to determine approximate nearest
+        neighbors.
+
+    set_op_mix_ratio: float (optional, default 1.0)
+        Interpolate between (fuzzy) union and intersection as the set operation
+        used to combine local fuzzy simplicial sets to obtain a global fuzzy
+        simplicial sets. Both fuzzy set operations use the product t-norm.
+        The value of this parameter should be between 0.0 and 1.0; a value of
+        1.0 will use a pure fuzzy union, while 0.0 will use a pure fuzzy
+        intersection.
+
+    local_connectivity: int (optional, default 1)
+        The local connectivity required -- i.e. the number of nearest
+        neighbors that should be assumed to be connected at a local level.
+        The higher this value the more connected the manifold becomes
+        locally. In practice this should be not more than the local intrinsic
+        dimension of the manifold.
+
+    verbose: bool (optional, default False)
+        Whether to report information on the current progress of the algorithm.
+
+    Returns
+    -------
+    fuzzy_simplicial_set: coo_matrix
+        A fuzzy simplicial set represented as a sparse matrix. The (i,
+        j) entry of the matrix represents the membership strength of the
+        1-simplex between the ith and jth sample points.
+    """
+    if knn_indices is None or knn_dists is None:
+        knn_indices, knn_dists, _ = nearest_faiss_neighbors(
+            X_index, n_neighbors, metric, metric_kwds, angular, random_state, verbose=verbose
+        )
+
+
+    sigmas, rhos = smooth_knn_dist(
+        knn_dists, float(n_neighbors), local_connectivity=float(local_connectivity),
+    )
+
+    rows, cols, vals = compute_membership_strengths(
+        knn_indices, knn_dists, sigmas, rhos
+    )
+
+    result = scipy.sparse.coo_matrix(
+        (vals, (rows, cols)), shape=(X_index.ntotal, X_index.ntotal)
     )
     result.eliminate_zeros()
 
@@ -932,7 +1081,7 @@ def simplicial_set_embedding(
     output_metric=dist.named_distances_with_gradients["euclidean"],
     output_metric_kwds={},
     euclidean_output=True,
-    parallel=False,
+    parallel=True,
     verbose=False,
 ):
     """Perform a fuzzy simplicial set embedding, using a specified
@@ -1862,7 +2011,7 @@ class UMAP(BaseEstimator):
             self._output_distance_func,
             self._output_metric_kwds,
             self.output_metric in ("euclidean", "l2"),
-            self.random_state is None,
+            True,
             self.verbose,
         )[inverse]
 
@@ -1873,6 +2022,313 @@ class UMAP(BaseEstimator):
 
         return self
 
+    def fit_faiss(self, X_index, y=None):
+        """Fit vectors in X into an embedded space.
+
+        Optionally use y for supervised dimension reduction.
+
+        Parameters
+        ----------
+        X_index : object, faiss index instance.
+
+        y : array, shape (n_samples)
+            A target array for supervised dimension reduction. How this is
+            handled is determined by parameters UMAP was instantiated with.
+            The relevant attributes are ``target_metric`` and
+            ``target_metric_kwds``.
+        """
+
+        self._raw_data = X_index
+
+        # Handle all the optional arguments, setting default
+        if self.a is None or self.b is None:
+            self._a, self._b = find_ab_params(self.spread, self.min_dist)
+        else:
+            self._a = self.a
+            self._b = self.b
+
+        if self.metric_kwds is not None:
+            self._metric_kwds = self.metric_kwds
+        else:
+            self._metric_kwds = {}
+
+        if self.target_metric_kwds is not None:
+            self._target_metric_kwds = self.target_metric_kwds
+        else:
+            self._target_metric_kwds = {}
+
+        if isinstance(self.init, np.ndarray):
+            init = check_array(self.init, dtype=np.float32, accept_sparse=False)
+        else:
+            init = self.init
+            if init != "random":
+                raise ValueError("Init '%s' not supported in faiss mode, use 'random'" % init)
+
+        self._initial_alpha = self.learning_rate
+
+        self._validate_parameters()
+        
+        faiss_metrics = {
+            0:{
+                "faiss":"METRIC_INNER_PRODUCT", # maximum inner product search
+                "umap": "cosine" # direct mapping makes sence only for unit length vectors
+            },
+            1:{
+                "faiss":"METRIC_L2", # squared L2 search
+                "umap":"euclidean"
+            },
+            2:{
+                "faiss":"METRIC_L1", # L1 (aka cityblock or manhattan)
+                "umap": "manhattan"
+            },
+            3:{
+                "faiss":"METRIC_Linf", # infinity distance
+                "umap": "chebyshev"
+            },
+            4:{
+                "faiss":"METRIC_Lp", # L_p distance, p is given by metric_arg
+                "umap": "chebyshev"
+            },
+            20:{
+                "faiss":"METRIC_Canberra",
+                "umap": "canberra"
+            },
+            21:{
+                "faiss":"METRIC_BrayCurtis",
+                "umap": "braycurtis"
+            },
+            22:{
+                "faiss":"METRIC_JensenShannon", # square root of the Jensen-Shannon divergence for p-vectors
+                "umap": "jensenshannon"
+            },
+
+        }
+
+        if X_index.metric_type in faiss_metrics:
+            metric_matched = faiss_metrics[X_index.metric_type]
+            self.metric = metric_matched["umap"]
+            if self.verbose:
+                print("Mapping faiss metric %s to %s" % (metric_matched["faiss"],metric_matched["umap"]))    
+        else:
+            raise ValueError("Metric %s is not supported by this code" % X_index.metric_type)
+
+        if self.verbose:
+            print(str(self))
+
+        # Error check n_neighbors based on data size
+        if X_index.ntotal <= self.n_neighbors:
+            if X_index.ntotal == 1:
+                self.embedding_ = np.zeros(
+                    (1, self.n_components)
+                )  # needed to sklearn comparability
+                return self
+
+            warn(
+                "n_neighbors is larger than the dataset size; truncating to "
+                "X.shape[0] - 1"
+            )
+            self._n_neighbors = X_index.ntotal - 1
+        else:
+            self._n_neighbors = self.n_neighbors
+
+        self._sparse_data = False
+
+        random_state = check_random_state(self.random_state)
+
+        if self.verbose:
+            print("Construct fuzzy simplicial set")
+
+        # extract knn indexes 
+        knn_indices = []
+        knn_dists = []
+        batch_size = 4096
+        
+        for batch_index in range(0, X_index.ntotal // batch_size):
+            # :( found no way to search within faiss index by vector index not by vector itself... todo:
+            reconstructed_vectors = X_index.reconstruct_n(batch_index*batch_size, batch_size)
+            ndist, nind  = X_index.search(reconstructed_vectors, self.n_neighbors+1)
+            knn_indices.append(nind[:,1:].astype(np.int32))
+            knn_dists.append(ndist[:,1:].astype(np.float32))
+            print('got nn for %s of %s vectors' % ((batch_index+1)*batch_size, X_index.ntotal))
+        # process remainder
+        if X_index.ntotal % batch_size > 0:
+            reconstructed_vectors = X_index.reconstruct_n(batch_index*batch_size, X_index.ntotal % batch_size)
+            ndist, nind  = X_index.search(reconstructed_vectors, self.n_neighbors+1)
+            knn_indices.append(nind[:,1:].astype(np.int32))
+            knn_dists.append(ndist[:,1:].astype(np.float32))
+            print('got nn for %s of %s vectors' % (batch_index*batch_size + X_index.ntotal % batch_size, X_index.ntotal))
+        # convert to int32
+        self._knn_indices = knn_indices = np.concatenate(knn_indices)
+        self._knn_dists = knn_dists = np.concatenate(knn_dists)
+
+        # Handle small cases efficiently by computing all distances
+        
+        self.graph_, self._sigmas, self._rhos = fuzzy_faiss_simplicial_set(
+            X_index,
+            self.n_neighbors,
+            random_state,
+            self.metric,
+            self._metric_kwds,
+            self._knn_indices,
+            self._knn_dists,
+            self.angular_rp_forest,
+            self.set_op_mix_ratio,
+            self.local_connectivity,
+            True,
+            self.verbose,
+        )
+
+        # Currently not checking if any duplicate points have differing labels
+        # Might be worth throwing a warning...
+        if y is not None:
+            len_X = len(X) if not scipy.sparse.issparse(X) else X.shape[0]
+            if len_X != len(y):
+                raise ValueError(
+                    "Length of x = {len_x}, length of y = {len_y}, while it must be equal.".format(
+                        len_x=len_X, len_y=len(y)
+                    )
+                )
+            y_ = check_array(y, ensure_2d=False)[index]
+            if self.target_metric == "categorical":
+                if self.target_weight < 1.0:
+                    far_dist = 2.5 * (1.0 / (1.0 - self.target_weight))
+                else:
+                    far_dist = 1.0e12
+                self.graph_ = discrete_metric_simplicial_set_intersection(
+                    self.graph_, y_, far_dist=far_dist
+                )
+            elif self.target_metric in dist.DISCRETE_METRICS:
+                if self.target_weight < 1.0:
+                    scale = 2.5 * (1.0 / (1.0 - self.target_weight))
+                else:
+                    scale = 1.0e12
+                # self.graph_ = discrete_metric_simplicial_set_intersection(
+                #     self.graph_,
+                #     y_,
+                #     metric=self.target_metric,
+                #     metric_kws=self._target_metric_kwds,
+                #     metric_scale=scale
+                # )
+
+                metric_kws = dist.get_discrete_params(y_, self.target_metric)
+
+                self.graph_ = discrete_metric_simplicial_set_intersection(
+                    self.graph_,
+                    y_,
+                    metric=self.target_metric,
+                    metric_kws=metric_kws,
+                    metric_scale=scale,
+                )
+            else:
+                if self.target_n_neighbors == -1:
+                    target_n_neighbors = self._n_neighbors
+                else:
+                    target_n_neighbors = self.target_n_neighbors
+
+                # Handle the small case as precomputed as before
+                if y.shape[0] < 4096:
+                    ydmat = pairwise_distances(
+                        y_[np.newaxis, :].T,
+                        metric=self.target_metric,
+                        **self._target_metric_kwds
+                    )
+
+                    target_graph, target_sigmas, target_rhos = fuzzy_simplicial_set(
+                        ydmat,
+                        target_n_neighbors,
+                        random_state,
+                        "precomputed",
+                        self._target_metric_kwds,
+                        None,
+                        None,
+                        False,
+                        1.0,
+                        1.0,
+                        False,
+                    )
+                else:
+                    # Standard case
+                    target_graph, target_sigmas, target_rhos = fuzzy_simplicial_set(
+                        y_[np.newaxis, :].T,
+                        target_n_neighbors,
+                        random_state,
+                        self.target_metric,
+                        self._target_metric_kwds,
+                        None,
+                        None,
+                        False,
+                        1.0,
+                        1.0,
+                        False,
+                    )
+                # product = self.graph_.multiply(target_graph)
+                # # self.graph_ = 0.99 * product + 0.01 * (self.graph_ +
+                # #                                        target_graph -
+                # #                                        product)
+                # self.graph_ = product
+                self.graph_ = general_simplicial_set_intersection(
+                    self.graph_, target_graph, self.target_weight
+                )
+                self.graph_ = reset_local_connectivity(self.graph_)
+
+        if self.n_epochs is None:
+            n_epochs = 0
+        else:
+            n_epochs = self.n_epochs
+
+        if self.verbose:
+            print(ts(), "Construct embedding")
+
+        self.embedding_ = simplicial_set_embedding(
+            X_index,  # JH why raw data?
+            self.graph_,
+            self.n_components,
+            self._initial_alpha,
+            self._a,
+            self._b,
+            self.repulsion_strength,
+            self.negative_sample_rate,
+            n_epochs,
+            init,
+            random_state,
+            self.metric,
+            self._metric_kwds,
+            self._output_distance_func,
+            self._output_metric_kwds,
+            self.output_metric in ("euclidean", "l2"),
+            True,
+            self.verbose,
+        )
+
+        if self.verbose:
+            print(ts() + " Finished embedding")
+
+        self._input_hash = '%s' % X_index.ntotal
+
+        return self
+
+    def fit_faiss_transform(self, X_index, y=None):
+        """Fit vectors stored in prebuild faiss index into an embedded space and return that transformed
+        output.
+
+        Parameters
+        ----------
+        X_index : object, faiss index instance.
+
+        y : array, shape (n_samples)
+            A target array for supervised dimension reduction. How this is
+            handled is determined by parameters UMAP was instantiated with.
+            The relevant attributes are ``target_metric`` and
+            ``target_metric_kwds``.
+
+        Returns
+        -------
+        X_new : array, shape (n_samples, n_components)
+            Embedding of the training data in low-dimensional space.
+        """
+        self.fit_faiss(X_index, y)
+        return self.embedding_
+    
     def fit_transform(self, X, y=None):
         """Fit X into an embedded space and return that transformed
         output.

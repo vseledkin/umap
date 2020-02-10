@@ -5,4 +5,5 @@ import numba
 
 import pkg_resources
 
-__version__ = pkg_resources.get_distribution("umap-learn").version
+#__version__ = pkg_resources.get_distribution("umap-learn").version
+__version__ = '0.4.0.rc1'
